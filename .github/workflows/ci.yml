@@ -39,6 +39,7 @@ jobs:
     needs: detect-changes
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         service:
           - account-service
@@ -71,13 +72,16 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "20"
-          cache: "npm"
-          cache-dependency-path: services/${{ matrix.service }}/package-lock.json
 
       - name: Install dependencies
         if: steps.changed.outputs.changed == 'true'
         working-directory: services/${{ matrix.service }}
-        run: npm ci
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
 
       - name: Run tests
         if: steps.changed.outputs.changed == 'true'
