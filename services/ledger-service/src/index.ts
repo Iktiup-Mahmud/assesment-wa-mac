@@ -1,4 +1,5 @@
 import express, { Request, Response } from "express";
+import { readFileSync } from "fs";
 import SHA256 from "crypto-js/sha256";
 import { Pool } from "pg";
 import { Gauge, Registry } from "prom-client";
@@ -128,7 +129,27 @@ app.get("/metrics", async (_req: Request, res: Response) => {
   res.end(await register.metrics());
 });
 
-app.listen(port, () => {
-  // eslint-disable-next-line no-console
-  console.log(`ledger-service listening on ${port}`);
-});
+const ensureSchema = async (): Promise<void> => {
+  const schema = readFileSync("/app/src/schema.sql", "utf8");
+  const statements = schema
+    .split(";")
+    .map((s: string) => s.trim())
+    .filter((s: string) => s.length > 0);
+
+  for (const statement of statements) {
+    await db.query(`${statement};`);
+  }
+};
+
+void ensureSchema()
+  .then(() => {
+    app.listen(port, () => {
+      // eslint-disable-next-line no-console
+      console.log(`ledger-service listening on ${port}`);
+    });
+  })
+  .catch((error) => {
+    // eslint-disable-next-line no-console
+    console.error("ledger-service schema init failed", error);
+    process.exit(1);
+  });

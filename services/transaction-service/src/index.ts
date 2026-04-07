@@ -1,5 +1,6 @@
 import axios from "axios";
 import express, { NextFunction, Request, Response } from "express";
+import { readFileSync } from "fs";
 import { randomUUID } from "crypto";
 import { Pool } from "pg";
 import { Counter, Gauge, Histogram, Registry } from "prom-client";
@@ -7,6 +8,7 @@ import {
   completeIdempotency,
   hashPayload,
   reserveIdempotencyKey,
+  waitForCompletedIdempotency,
 } from "./idempotency";
 import { logger, sanitizeForLogging } from "./logger";
 import { TransferRequest } from "./types";
@@ -72,19 +74,65 @@ app.post("/transfers", async (req: Request, res: Response) => {
 
   const payloadHash = hashPayload(body);
   const client = await pool.connect();
+  let clientReleased = false;
   try {
-    await client.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
     const reserved = await reserveIdempotencyKey(
       client,
       idempotencyKey,
       payloadHash,
     );
-    await client.query("COMMIT");
+    client.release();
+    clientReleased = true;
 
     if (!reserved.isNew && reserved.existingResponse) {
+      if (reserved.existingResponse.status === 202) {
+        const completed = await waitForCompletedIdempotency(
+          pool,
+          idempotencyKey,
+        );
+        if (completed !== null) {
+          return res.status(completed.status).json(JSON.parse(completed.body));
+        }
+      }
+
       return res
         .status(reserved.existingResponse.status)
         .json(JSON.parse(reserved.existingResponse.body));
+    }
+
+    const priorTransaction = await pool.query<{
+      id: string;
+      amount: string;
+      currency: string;
+      status: string;
+    }>(
+      `SELECT id, amount, currency, status
+       FROM transactions
+       WHERE idempotency_key = $1
+       LIMIT 1`,
+      [idempotencyKey],
+    );
+
+    if ((priorTransaction.rowCount ?? 0) > 0) {
+      const existing = priorTransaction.rows[0];
+      const replayResponse = {
+        transaction_id: existing.id,
+        status: existing.status,
+        ledger_entries: [
+          {
+            entry_type: "debit",
+            amount: existing.amount,
+            currency: existing.currency,
+          },
+          {
+            entry_type: "credit",
+            amount: existing.amount,
+            currency: existing.currency,
+          },
+        ],
+      };
+      await completeIdempotency(pool, idempotencyKey, 200, replayResponse);
+      return res.status(200).json(replayResponse);
     }
 
     const transactionId = randomUUID();
@@ -134,8 +182,50 @@ app.post("/transfers", async (req: Request, res: Response) => {
     });
     return res.status(200).json(responseBody);
   } catch (error) {
-    await client.query("ROLLBACK");
     const message = error instanceof Error ? error.message : "UNKNOWN";
+
+    const code =
+      typeof error === "object" && error !== null && "code" in error
+        ? String((error as { code?: string }).code ?? "")
+        : "";
+
+    if (code === "23505") {
+      const priorTransaction = await pool.query<{
+        id: string;
+        amount: string;
+        currency: string;
+        status: string;
+      }>(
+        `SELECT id, amount, currency, status
+         FROM transactions
+         WHERE idempotency_key = $1
+         LIMIT 1`,
+        [idempotencyKey],
+      );
+
+      if ((priorTransaction.rowCount ?? 0) > 0) {
+        const existing = priorTransaction.rows[0];
+        const replayResponse = {
+          transaction_id: existing.id,
+          status: existing.status,
+          ledger_entries: [
+            {
+              entry_type: "debit",
+              amount: existing.amount,
+              currency: existing.currency,
+            },
+            {
+              entry_type: "credit",
+              amount: existing.amount,
+              currency: existing.currency,
+            },
+          ],
+        };
+        await completeIdempotency(pool, idempotencyKey, 200, replayResponse);
+        return res.status(200).json(replayResponse);
+      }
+    }
+
     if (message === "PAYLOAD_MISMATCH") {
       return res
         .status(409)
@@ -151,7 +241,9 @@ app.post("/transfers", async (req: Request, res: Response) => {
     );
     return res.status(500).json({ error: message });
   } finally {
-    client.release();
+    if (!clientReleased) {
+      client.release();
+    }
   }
 });
 
@@ -231,12 +323,41 @@ app.get("/metrics", async (_req: Request, res: Response) => {
 });
 
 setInterval(async () => {
-  const result = await axios.get(`${ledgerUrl}/ledger/invariant`);
-  const violations = Number(result.data.violations ?? 0);
-  ledgerInvariantViolations.set(violations);
+  try {
+    const result = await axios.get(`${ledgerUrl}/ledger/invariant`);
+    const violations = Number(result.data.violations ?? 0);
+    ledgerInvariantViolations.set(violations);
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "INVARIANT_POLL_FAILED";
+    failedTxCounter.inc({
+      service: "transaction-service",
+      error_type: message,
+    });
+  }
 }, 60000);
 
-app.listen(port, () => {
-  // eslint-disable-next-line no-console
-  console.log(`transaction-service listening on ${port}`);
-});
+const ensureSchema = async (): Promise<void> => {
+  const schema = readFileSync("/app/src/schema.sql", "utf8");
+  const statements = schema
+    .split(";")
+    .map((s: string) => s.trim())
+    .filter((s: string) => s.length > 0);
+
+  for (const statement of statements) {
+    await pool.query(`${statement};`);
+  }
+};
+
+void ensureSchema()
+  .then(() => {
+    app.listen(port, () => {
+      // eslint-disable-next-line no-console
+      console.log(`transaction-service listening on ${port}`);
+    });
+  })
+  .catch((error) => {
+    // eslint-disable-next-line no-console
+    console.error("transaction-service schema init failed", error);
+    process.exit(1);
+  });

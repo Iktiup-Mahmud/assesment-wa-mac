@@ -1,5 +1,6 @@
 import axios from "axios";
 import express, { Request, Response } from "express";
+import { readFileSync } from "fs";
 import { randomUUID } from "crypto";
 import { Pool } from "pg";
 
@@ -132,7 +133,27 @@ app.post("/fx/consume", async (req: Request, res: Response) => {
   }
 });
 
-app.listen(port, () => {
-  // eslint-disable-next-line no-console
-  console.log(`fx-service listening on ${port}`);
-});
+const ensureSchema = async (): Promise<void> => {
+  const schema = readFileSync("/app/src/schema.sql", "utf8");
+  const statements = schema
+    .split(";")
+    .map((s: string) => s.trim())
+    .filter((s: string) => s.length > 0);
+
+  for (const statement of statements) {
+    await db.query(`${statement};`);
+  }
+};
+
+void ensureSchema()
+  .then(() => {
+    app.listen(port, () => {
+      // eslint-disable-next-line no-console
+      console.log(`fx-service listening on ${port}`);
+    });
+  })
+  .catch((error) => {
+    // eslint-disable-next-line no-console
+    console.error("fx-service schema init failed", error);
+    process.exit(1);
+  });

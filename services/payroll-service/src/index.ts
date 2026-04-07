@@ -1,6 +1,7 @@
 import axios from "axios";
 import { Job, Queue, Worker } from "bullmq";
 import express, { Request, Response } from "express";
+import { readFileSync } from 'fs';
 import IORedis from "ioredis";
 import { randomUUID } from "crypto";
 import { Pool } from "pg";
@@ -155,7 +156,27 @@ app.get("/payroll/jobs/:id", async (req: Request, res: Response) => {
   return res.json(job.rows[0]);
 });
 
-app.listen(port, () => {
-  // eslint-disable-next-line no-console
-  console.log(`payroll-service listening on ${port}`);
-});
+const ensureSchema = async (): Promise<void> => {
+  const schema = readFileSync('/app/src/schema.sql', 'utf8');
+  const statements = schema
+    .split(';')
+    .map((s: string) => s.trim())
+    .filter((s: string) => s.length > 0);
+
+  for (const statement of statements) {
+    await db.query(`${statement};`);
+  }
+};
+
+void ensureSchema()
+  .then(() => {
+    app.listen(port, () => {
+      // eslint-disable-next-line no-console
+      console.log(`payroll-service listening on ${port}`);
+    });
+  })
+  .catch((error) => {
+    // eslint-disable-next-line no-console
+    console.error('payroll-service schema init failed', error);
+    process.exit(1);
+  });

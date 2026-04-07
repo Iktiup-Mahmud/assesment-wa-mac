@@ -1,6 +1,7 @@
 import axios from "axios";
 import express, { Request, Response } from "express";
 import { Pool } from "pg";
+import { readFileSync } from 'fs';
 
 const app = express();
 app.use(express.json());
@@ -60,7 +61,27 @@ app.post("/admin/reverse/:id", async (req: Request, res: Response) => {
   res.json({ status: "reversal_requested", transaction_id: txId });
 });
 
-app.listen(port, () => {
-  // eslint-disable-next-line no-console
-  console.log(`admin-service listening on ${port}`);
-});
+const ensureSchema = async (): Promise<void> => {
+  const schema = readFileSync('/app/src/schema.sql', 'utf8');
+  const statements = schema
+    .split(';')
+    .map((s: string) => s.trim())
+    .filter((s: string) => s.length > 0);
+
+  for (const statement of statements) {
+    await db.query(`${statement};`);
+  }
+};
+
+void ensureSchema()
+  .then(() => {
+    app.listen(port, () => {
+      // eslint-disable-next-line no-console
+      console.log(`admin-service listening on ${port}`);
+    });
+  })
+  .catch((error) => {
+    // eslint-disable-next-line no-console
+    console.error('admin-service schema init failed', error);
+    process.exit(1);
+  });
