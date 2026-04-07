@@ -1,0 +1,153 @@
+version: "3.9"
+
+services:
+  gateway:
+    image: nginx:1.27-alpine
+    ports:
+      - "8080:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - account-service
+      - transaction-service
+      - ledger-service
+      - fx-service
+      - payroll-service
+      - admin-service
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  account-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: novapay
+      POSTGRES_PASSWORD: novapay
+      POSTGRES_DB: account
+    ports: ["5433:5432"]
+
+  transaction-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: novapay
+      POSTGRES_PASSWORD: novapay
+      POSTGRES_DB: transaction
+    ports: ["5434:5432"]
+
+  ledger-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: novapay
+      POSTGRES_PASSWORD: novapay
+      POSTGRES_DB: ledger
+    ports: ["5435:5432"]
+
+  fx-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: novapay
+      POSTGRES_PASSWORD: novapay
+      POSTGRES_DB: fx
+    ports: ["5436:5432"]
+
+  payroll-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: novapay
+      POSTGRES_PASSWORD: novapay
+      POSTGRES_DB: payroll
+    ports: ["5437:5432"]
+
+  admin-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: novapay
+      POSTGRES_PASSWORD: novapay
+      POSTGRES_DB: admin
+    ports: ["5438:5432"]
+
+  account-service:
+    build: ../services/account-service
+    environment:
+      PORT: 3001
+      SERVICE_NAME: account-service
+      DATABASE_URL: postgresql://novapay:novapay@account-db:5432/account
+    depends_on: [account-db]
+
+  transaction-service:
+    build: ../services/transaction-service
+    environment:
+      PORT: 3002
+      SERVICE_NAME: transaction-service
+      DATABASE_URL: postgresql://novapay:novapay@transaction-db:5432/transaction
+      LEDGER_SERVICE_URL: http://ledger-service:3003
+      FX_SERVICE_URL: http://fx-service:3004
+      ACCOUNT_SERVICE_URL: http://account-service:3001
+    depends_on: [transaction-db, ledger-service, fx-service]
+
+  ledger-service:
+    build: ../services/ledger-service
+    environment:
+      PORT: 3003
+      SERVICE_NAME: ledger-service
+      DATABASE_URL: postgresql://novapay:novapay@ledger-db:5432/ledger
+    depends_on: [ledger-db]
+
+  fx-service:
+    build: ../services/fx-service
+    environment:
+      PORT: 3004
+      SERVICE_NAME: fx-service
+      DATABASE_URL: postgresql://novapay:novapay@fx-db:5432/fx
+      FX_PROVIDER_URL: http://fx-provider:4010/rates
+    depends_on: [fx-db, fx-provider]
+
+  fx-provider:
+    image: hashicorp/http-echo:1.0
+    command: ["-listen=:4010", '-text={"rate":109.50}']
+
+  payroll-service:
+    build: ../services/payroll-service
+    environment:
+      PORT: 3005
+      SERVICE_NAME: payroll-service
+      DATABASE_URL: postgresql://novapay:novapay@payroll-db:5432/payroll
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      TRANSACTION_SERVICE_URL: http://transaction-service:3002
+    depends_on: [payroll-db, redis, transaction-service]
+
+  admin-service:
+    build: ../services/admin-service
+    environment:
+      PORT: 3006
+      SERVICE_NAME: admin-service
+      DATABASE_URL: postgresql://novapay:novapay@admin-db:5432/admin
+      LEDGER_SERVICE_URL: http://ledger-service:3003
+      TRANSACTION_SERVICE_URL: http://transaction-service:3002
+    depends_on: [admin-db, ledger-service, transaction-service]
+
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    ports:
+      - "3300:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.59
+    ports:
+      - "16686:16686"
+      - "14268:14268"

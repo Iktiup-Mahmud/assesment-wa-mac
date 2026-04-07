@@ -1,0 +1,55 @@
+name: Enforce Service Version Bump
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  version-bump-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check changed services are version bumped
+        shell: bash
+        run: |
+          set -euo pipefail
+          base_ref="origin/${{ github.base_ref }}"
+          git fetch origin "${{ github.base_ref }}"
+
+          services=(account-service transaction-service ledger-service fx-service payroll-service admin-service)
+
+          for svc in "${services[@]}"; do
+            changed=$(git diff --name-only "$base_ref"...HEAD -- "services/$svc/**" | wc -l | tr -d ' ')
+            if [[ "$changed" -gt 0 ]]; then
+              current_file="services/$svc/package.json"
+              if [[ ! -f "$current_file" ]]; then
+                echo "Missing $current_file"
+                exit 1
+              fi
+
+              current_version=$(node -p "require('./$current_file').version")
+              base_version=$(git show "$base_ref:$current_file" 2>/dev/null | node -e "const fs=require('fs');const s=fs.readFileSync(0,'utf8');const j=JSON.parse(s);console.log(j.version)" || true)
+
+              if [[ -z "$base_version" ]]; then
+                echo "Service $svc appears new; skipping base compare"
+                continue
+              fi
+
+              if [[ "$current_version" == "$base_version" ]]; then
+                echo "Version not bumped for $svc (still $current_version)"
+                exit 1
+              fi
+
+              node -e "
+                const [a,b,c]=process.argv[1].split('.').map(Number);
+                const [x,y,z]=process.argv[2].split('.').map(Number);
+                const valid=(a>x)|| (a===x && b>y) || (a===x && b===y && c>z);
+                if(!valid){ process.exit(1); }
+              " "$current_version" "$base_version" || { echo "Invalid semver bump for $svc: $base_version -> $current_version"; exit 1; }
+
+              echo "$svc: $base_version -> $current_version"
+            fi
+          done
